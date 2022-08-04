@@ -582,6 +582,7 @@ func TestRecursive(t *testing.T) {
 	case "linux":
 		// Run test.
 	default:
+		// Ensure we get correct error.
 		tmp := t.TempDir()
 		w := newWatcher(t)
 		err := w.Add(filepath.Join(tmp, "..."))
@@ -604,113 +605,95 @@ func TestRecursive(t *testing.T) {
 	// subdirectory immediately after adding the watch (and, if desired,
 	// recursively add watches for any subdirectories that it contains).
 
-	tests := []struct {
-		name      string
-		preWatch  func(*testing.T, string)
-		postWatch func(*testing.T, string)
-		want      Events
-	}{
-		{"basic",
-			func(t *testing.T, tmp string) {
-				mkdirAll(t, tmp, "/one/two/three/four")
-			},
-			func(t *testing.T, tmp string) {
-				cat(t, "asd", tmp, "file.txt")
-				cat(t, "asd", tmp, "one/two/three/file.txt")
-			},
-			Events{
-				{"/file.txt", Create},
-				{"/file.txt", Write},
-				{"/one/two/three/file.txt", Create},
-				{"/one/two/three/file.txt", Write},
-			},
-		},
+	tests := []testCase{
+		{"basic", func(t *testing.T, w *Watcher, tmp string) {
+			mkdirAll(t, tmp, "/one/two/three/four")
+			addWatch(t, w, tmp, "...")
 
-		{"add directory",
-			func(t *testing.T, tmp string) {
-				mkdirAll(t, tmp, "/one/two/three/four")
-			},
-			func(t *testing.T, tmp string) {
-				mkdirAll(t, tmp, "one/two/new/dir")
-				touch(t, tmp, "one/two/new/file")
-				touch(t, tmp, "one/two/new/dir/file")
-			},
-			Events{
-				// TODO: don't see the new/dir being created; I guess this
-				//       happens too fast; splitting out the mkdirAll() with
-				//       eventSeparator in-between "fixes" it. May be resolved
-				//       by #470.
-				{"/one/two/new", Create},
-				{"/one/two/new/file", Create},
-				{"/one/two/new/dir/file", Create},
-			},
-		},
+			// func(t *testing.T, tmp string) {
+			cat(t, "asd", tmp, "file.txt")
+			cat(t, "asd", tmp, "one/two/three/file.txt")
+		}, `
+			CREATE  "/file.txt"
+			WRITE   "/file.txt"
+			CREATE  "/one/two/three/file.txt"
+			WRITE   "/one/two/three/file.txt"
+		`},
 
-		// TODO: this test is flaky due to #470
-		// {"remove directory",
-		// 	func(t *testing.T, tmp string) {
-		// 		mkdirAll(t, tmp, "/one/two/three/four")
-		// 	},
-		// 	func(t *testing.T, tmp string) {
-		// 		cat(t, "asd", tmp, "one/two/three/file.txt")
-		// 		rmAll(t, tmp, "one/two")
-		// 	},
-		// 	Events{
-		// 		// TODO: this includes many duplicate events as we get a
-		// 		//       notification both for the watch on the directory itself
-		// 		//       as well as the parent that watches the directory.
-		// 		{"/one/two/three/file.txt", Create},
-		// 		{"/one/two/three/file.txt", Remove},
-		// 		{"/one/two/three/four", Remove},
-		// 		{"/one/two/three/four", Remove},
-		// 		{"/one/two/three", Remove},
-		// 		{"/one/two/three", Remove},
-		// 		{"/one/two", Remove},
-		// 		{"/one/two", Remove},
-		// 	},
-		// },
+		{"add directory", func(t *testing.T, w *Watcher, tmp string) {
+			mkdirAll(t, tmp, "/one/two/three/four")
+			addWatch(t, w, tmp, "...")
 
-		{
-			"rename directory",
-			func(t *testing.T, tmp string) {
-				mkdirAll(t, tmp, "/one/two/three/four")
-			},
-			func(t *testing.T, tmp string) {
-				mv(t, filepath.Join(tmp, "one"), tmp, "one-rename")
-				touch(t, tmp, "one-rename/file")
-				touch(t, tmp, "one-rename/two/three/file")
-			},
-			Events{
-				// TODO: rename + create + rename doesn't seem quite right.
-				{"/one", Rename},
-				{"/one-rename", Create},
-				{"/one-rename", Rename},
-				{"/one-rename/file", Create},
-				{"/one-rename/two/three/file", Create},
-			},
-		},
+			mkdirAll(t, tmp, "one/two/new/dir")
+			touch(t, tmp, "one/two/new/file")
+			touch(t, tmp, "one/two/new/dir/file")
+		}, `
+			# TODO: don't see the new/dir being created.
+			CREATE   "/one/two/new"
+			CREATE   "/one/two/new/file"
+			CREATE   "/one/two/new/dir/file"
+		`},
+
+		{"remove directory", func(t *testing.T, w *Watcher, tmp string) {
+			mkdirAll(t, tmp, "/one/two/three/four")
+			addWatch(t, w, tmp, "...")
+
+			cat(t, "asd", tmp, "one/two/three/file.txt")
+			rmAll(t, tmp, "one/two")
+		}, `
+			# TODO: this includes many duplicate events as we get a
+			#       notification both for the watch on the directory itself
+			#       as well as the parent that watches the directory.
+			CREATE   "/one/two/three/file.txt"
+			WRITE    "/one/two/three/file.txt"
+			REMOVE   "/one/two/three/file.txt"
+			REMOVE   "/one/two/three/four"
+			REMOVE   "/one/two/three/four"
+			REMOVE   "/one/two/three"
+			REMOVE   "/one/two/three"
+			REMOVE   "/one/two"
+			REMOVE   "/one/two"
+		`},
+
+		{"rename directory", func(t *testing.T, w *Watcher, tmp string) {
+			mkdirAll(t, tmp, "/one/two/three/four")
+			addWatch(t, w, tmp, "...")
+
+			mv(t, filepath.Join(tmp, "one"), tmp, "one-rename")
+			touch(t, tmp, "one-rename/file")
+			touch(t, tmp, "one-rename/two/three/file")
+		}, `
+			# TODO: rename + create + rename doesn't seem quite right?
+			RENAME   "/one"
+			CREATE   "/one-rename"
+			RENAME   "/one-rename"
+			CREATE   "/one-rename/file"
+			CREATE   "/one-rename/two/three/file"
+		`},
 	}
 
 	for _, tt := range tests {
 		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			tmp := t.TempDir()
-			w := newCollector(t)
+		tt.run(t)
 
-			tt.preWatch(t, tmp)
-			addWatch(t, w.w, tmp, "...")
-			tt.postWatch(t, tmp)
+		// t.Run(tt.name, func(t *testing.T) {
+		// 	t.Parallel()
+		// 	tmp := t.TempDir()
+		// 	w := newCollector(t)
 
-			w.collect(t)
-			have := w.stop(t)
-			for i := range have {
-				have[i].Name = strings.TrimPrefix(have[i].Name, tmp)
-			}
+		// 	tt.preWatch(t, tmp)
+		// 	addWatch(t, w.w, tmp, "...")
+		// 	tt.postWatch(t, tmp)
 
-			if have.String() != tt.want.String() {
-				t.Errorf("\nhave:\n%s\nwant:\n%s", have, tt.want)
-			}
-		})
+		// 	w.collect(t)
+		// 	have := w.stop(t)
+		// 	for i := range have {
+		// 		have[i].Name = strings.TrimPrefix(have[i].Name, tmp)
+		// 	}
+
+		// 	if have.String() != tt.want.String() {
+		// 		t.Errorf("\nhave:\n%s\nwant:\n%s", have, tt.want)
+		// 	}
+		// })
 	}
 }
