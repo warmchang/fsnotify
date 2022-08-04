@@ -94,19 +94,19 @@ func mkdir(t *testing.T, path ...string) {
 }
 
 // mkdir -p
-// func mkdirAll(t *testing.T, path ...string) {
-// 	t.Helper()
-// 	if len(path) < 1 {
-// 		t.Fatalf("mkdirAll: path must have at least one element: %s", path)
-// 	}
-// 	err := os.MkdirAll(filepath.Join(path...), 0o0755)
-// 	if err != nil {
-// 		t.Fatalf("mkdirAll(%q): %s", filepath.Join(path...), err)
-// 	}
-// 	if shouldWait(path...) {
-// 		eventSeparator()
-// 	}
-// }
+func mkdirAll(t *testing.T, path ...string) {
+	t.Helper()
+	if len(path) < 1 {
+		t.Fatalf("mkdirAll: path must have at least one element: %s", path)
+	}
+	err := os.MkdirAll(filepath.Join(path...), 0o0755)
+	if err != nil {
+		t.Fatalf("mkdirAll(%q): %s", filepath.Join(path...), err)
+	}
+	if shouldWait(path...) {
+		eventSeparator()
+	}
+}
 
 // ln -s
 func symlink(t *testing.T, target string, link ...string) {
@@ -447,4 +447,14 @@ func indent(s fmt.Stringer) string {
 func isCI() bool {
 	_, ok := os.LookupEnv("CI")
 	return ok
+}
+
+func errorContains(out error, want string) bool {
+	if out == nil {
+		return want == ""
+	}
+	if want == "" {
+		return false
+	}
+	return strings.Contains(out.Error(), want)
 }

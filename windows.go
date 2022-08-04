@@ -105,6 +105,11 @@ func (w *Watcher) Add(name string) error {
 	}
 	w.mu.Unlock()
 
+	_, recurse := recursivePath(name)
+	if recurse {
+		return ErrRecursionUnsupported
+	}
+
 	in := &input{
 		op:    opAddWatch,
 		path:  filepath.Clean(name),

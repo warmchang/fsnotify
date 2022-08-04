@@ -151,6 +151,11 @@ func (w *Watcher) Close() error {
 
 // Add starts watching the named file or directory (non-recursively).
 func (w *Watcher) Add(name string) error {
+	_, recurse := recursivePath(name)
+	if recurse {
+		return ErrRecursionUnsupported
+	}
+
 	w.mu.Lock()
 	w.userWatches[name] = struct{}{}
 	w.mu.Unlock()

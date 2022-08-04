@@ -12,7 +12,26 @@ package fsnotify
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"strings"
+)
+
+// These are the generalized file operations that can trigger a notification.
+const (
+	Create Op = 1 << iota
+	Write
+	Remove
+	Rename
+	Chmod
+)
+
+// Common errors that can be reported by a watcher
+var (
+	ErrNonExistentWatch     = errors.New("can't remove non-existent watcher")
+	ErrEventOverflow        = errors.New("fsnotify queue overflow")
+	ErrNotDirectory         = errors.New("not a directory")
+	ErrRecursionUnsupported = errors.New("recursion not supported")
 )
 
 // Event represents a single file system notification.
@@ -33,21 +52,6 @@ type Event struct {
 
 // Op describes a set of file operations.
 type Op uint32
-
-// These are the generalized file operations that can trigger a notification.
-const (
-	Create Op = 1 << iota
-	Write
-	Remove
-	Rename
-	Chmod
-)
-
-// Common errors that can be reported by a watcher
-var (
-	ErrNonExistentWatch = errors.New("can't remove non-existent watcher")
-	ErrEventOverflow    = errors.New("fsnotify queue overflow")
-)
 
 func (op Op) String() string {
 	var b strings.Builder
@@ -82,4 +86,35 @@ func (e Event) Has(op Op) bool { return e.Op.Has(op) }
 // "file: REMOVE|WRITE|..."
 func (e Event) String() string {
 	return fmt.Sprintf("%q: %s", e.Name, e.Op.String())
+}
+
+// findDirs finds all directories under path (return value *includes* path as
+// the first entry).
+func findDirs(path string) ([]string, error) {
+	dirs := make([]string, 0, 8)
+	err := filepath.WalkDir(path, func(root string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if root == path && !d.IsDir() {
+			return fmt.Errorf("%q: %w", path, ErrNotDirectory)
+		}
+		if d.IsDir() {
+			dirs = append(dirs, root)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dirs, nil
+}
+
+// Check if this path is recursive (ends with "/..."), and return the path with
+// the /... stripped.
+func recursivePath(path string) (string, bool) {
+	if filepath.Base(path) == "..." {
+		return filepath.Dir(path), true
+	}
+	return path, false
 }

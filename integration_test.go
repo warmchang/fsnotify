@@ -576,3 +576,141 @@ func TestRemove(t *testing.T) {
 		}
 	})
 }
+
+func TestRecursive(t *testing.T) {
+	switch runtime.GOOS {
+	case "linux":
+		// Run test.
+	default:
+		tmp := t.TempDir()
+		w := newWatcher(t)
+		err := w.Add(filepath.Join(tmp, "..."))
+		if !errors.Is(err, ErrRecursionUnsupported) {
+			t.Errorf("wrong error: %s", err)
+		}
+		return
+	}
+
+	// inotify(7):
+	// Inotify monitoring of directories is not recursive: to monitor
+	// subdirectories under a directory, additional watches must be created.
+	// This can take a significant amount time for large directory trees.
+	//
+	// If monitoring an entire directory subtree, and a new subdirectory is
+	// created in that tree or an existing directory is renamed into that
+	// tree, be aware that by the time you create a watch for the new
+	// subdirectory, new files (and subdirectories) may already exist inside
+	// the subdirectory.  Therefore, you may want to scan the contents of the
+	// subdirectory immediately after adding the watch (and, if desired,
+	// recursively add watches for any subdirectories that it contains).
+
+	tests := []struct {
+		name      string
+		preWatch  func(*testing.T, string)
+		postWatch func(*testing.T, string)
+		want      Events
+	}{
+		{"basic",
+			func(t *testing.T, tmp string) {
+				mkdirAll(t, tmp, "/one/two/three/four")
+			},
+			func(t *testing.T, tmp string) {
+				cat(t, "asd", tmp, "file.txt")
+				cat(t, "asd", tmp, "one/two/three/file.txt")
+			},
+			Events{
+				{"/file.txt", Create},
+				{"/file.txt", Write},
+				{"/one/two/three/file.txt", Create},
+				{"/one/two/three/file.txt", Write},
+			},
+		},
+
+		{"add directory",
+			func(t *testing.T, tmp string) {
+				mkdirAll(t, tmp, "/one/two/three/four")
+			},
+			func(t *testing.T, tmp string) {
+				mkdirAll(t, tmp, "one/two/new/dir")
+				touch(t, tmp, "one/two/new/file")
+				touch(t, tmp, "one/two/new/dir/file")
+			},
+			Events{
+				// TODO: don't see the new/dir being created; I guess this
+				//       happens too fast; splitting out the mkdirAll() with
+				//       eventSeparator in-between "fixes" it. May be resolved
+				//       by #470.
+				{"/one/two/new", Create},
+				{"/one/two/new/file", Create},
+				{"/one/two/new/dir/file", Create},
+			},
+		},
+
+		// TODO: this test is flaky due to #470
+		// {"remove directory",
+		// 	func(t *testing.T, tmp string) {
+		// 		mkdirAll(t, tmp, "/one/two/three/four")
+		// 	},
+		// 	func(t *testing.T, tmp string) {
+		// 		cat(t, "asd", tmp, "one/two/three/file.txt")
+		// 		rmAll(t, tmp, "one/two")
+		// 	},
+		// 	Events{
+		// 		// TODO: this includes many duplicate events as we get a
+		// 		//       notification both for the watch on the directory itself
+		// 		//       as well as the parent that watches the directory.
+		// 		{"/one/two/three/file.txt", Create},
+		// 		{"/one/two/three/file.txt", Remove},
+		// 		{"/one/two/three/four", Remove},
+		// 		{"/one/two/three/four", Remove},
+		// 		{"/one/two/three", Remove},
+		// 		{"/one/two/three", Remove},
+		// 		{"/one/two", Remove},
+		// 		{"/one/two", Remove},
+		// 	},
+		// },
+
+		{
+			"rename directory",
+			func(t *testing.T, tmp string) {
+				mkdirAll(t, tmp, "/one/two/three/four")
+			},
+			func(t *testing.T, tmp string) {
+				mv(t, filepath.Join(tmp, "one"), tmp, "one-rename")
+				touch(t, tmp, "one-rename/file")
+				touch(t, tmp, "one-rename/two/three/file")
+			},
+			Events{
+				// TODO: rename + create + rename doesn't seem quite right.
+				{"/one", Rename},
+				{"/one-rename", Create},
+				{"/one-rename", Rename},
+				{"/one-rename/file", Create},
+				{"/one-rename/two/three/file", Create},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmp := t.TempDir()
+			w := newCollector(t)
+
+			tt.preWatch(t, tmp)
+			addWatch(t, w.w, tmp, "...")
+			tt.postWatch(t, tmp)
+
+			w.collect(t)
+			have := w.stop(t)
+			for i := range have {
+				have[i].Name = strings.TrimPrefix(have[i].Name, tmp)
+			}
+
+			if have.String() != tt.want.String() {
+				t.Errorf("\nhave:\n%s\nwant:\n%s", have, tt.want)
+			}
+		})
+	}
+}
