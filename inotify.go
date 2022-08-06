@@ -121,8 +121,8 @@ func (w *Watcher) Close() error {
 // Add starts watching a file or directory.
 //
 // If the path is a directory then changes to that directory are watched
-// non-recursively. If the path ends with "..." changes in the entire directory
-// tree are watched. ErrNotDirectory is returned when using "..." on a file.
+// non-recursively. If the path ends with "/..." changes in the entire directory
+// tree are watched. ErrNotDirectory is returned when using "/..." on a file.
 //
 // Symlinks are not followed.
 func (w *Watcher) Add(path string) error {
@@ -344,30 +344,13 @@ func (w *Watcher) readEvents() {
 	}
 }
 
-// Certain types of events can be "ignored" and not sent over the Events
-// channel. Such as events marked ignore by the kernel, or MODIFY events
-// against files that do not exist.
-func (e *Event) ignoreLinux(mask uint32) bool {
-	// Ignore anything the inotify API says to ignore
-	if mask&unix.IN_IGNORED == unix.IN_IGNORED {
-		return true
-	}
-
-	// If the event is Create or Write, the file must exist, or the
-	// event will be suppressed.
-	// *Note*: this was put in place because it was seen that a Write
-	// event was sent after the Remove. This ignores the Write and
-	// assumes a Remove will come or has come if the file doesn't exist.
-	if e.Op&Create == Create || e.Op&Write == Write {
-		_, statErr := os.Lstat(e.Name)
-		return os.IsNotExist(statErr)
-	}
-	return false
-}
-
+// Check if path was added as a recursive watch ("dir/...").
+//
+// Returns the watch for the path, or nil.
 func (w *Watcher) isRecursive(path string) *watch {
 	ww, ok := w.watches[path]
 	if !ok {
+		// path could be a file, so also check the Dir.
 		path = filepath.Dir(path)
 		ww, ok = w.watches[path]
 		if !ok {

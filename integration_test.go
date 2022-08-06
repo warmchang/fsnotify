@@ -577,7 +577,7 @@ func TestRemove(t *testing.T) {
 	})
 }
 
-func TestRecursive(t *testing.T) {
+func TestWatcherRecursive(t *testing.T) {
 	switch runtime.GOOS {
 	case "linux":
 		// Run test.
@@ -606,13 +606,13 @@ func TestRecursive(t *testing.T) {
 	// recursively add watches for any subdirectories that it contains).
 
 	tests := []testCase{
+		// Make a nested directory tree, then write some files there.
 		{"basic", func(t *testing.T, w *Watcher, tmp string) {
 			mkdirAll(t, tmp, "/one/two/three/four")
-			addWatch(t, w, tmp, "...")
+			addWatch(t, w, tmp, "/...")
 
-			// func(t *testing.T, tmp string) {
-			cat(t, "asd", tmp, "file.txt")
-			cat(t, "asd", tmp, "one/two/three/file.txt")
+			cat(t, "asd", tmp, "/file.txt")
+			cat(t, "asd", tmp, "/one/two/three/file.txt")
 		}, `
 			CREATE  "/file.txt"
 			WRITE   "/file.txt"
@@ -622,11 +622,11 @@ func TestRecursive(t *testing.T) {
 
 		{"add directory", func(t *testing.T, w *Watcher, tmp string) {
 			mkdirAll(t, tmp, "/one/two/three/four")
-			addWatch(t, w, tmp, "...")
+			addWatch(t, w, tmp, "/...")
 
-			mkdirAll(t, tmp, "one/two/new/dir")
-			touch(t, tmp, "one/two/new/file")
-			touch(t, tmp, "one/two/new/dir/file")
+			mkdirAll(t, tmp, "/one/two/new/dir")
+			touch(t, tmp, "/one/two/new/file")
+			touch(t, tmp, "/one/two/new/dir/file")
 		}, `
 			# TODO: don't see the new/dir being created.
 			CREATE   "/one/two/new"
@@ -634,6 +634,7 @@ func TestRecursive(t *testing.T) {
 			CREATE   "/one/two/new/dir/file"
 		`},
 
+		// Remove nested directory
 		{"remove directory", func(t *testing.T, w *Watcher, tmp string) {
 			mkdirAll(t, tmp, "/one/two/three/four")
 			addWatch(t, w, tmp, "...")
@@ -655,6 +656,7 @@ func TestRecursive(t *testing.T) {
 			REMOVE   "/one/two"
 		`},
 
+		// Rename nested directory
 		{"rename directory", func(t *testing.T, w *Watcher, tmp string) {
 			mkdirAll(t, tmp, "/one/two/three/four")
 			addWatch(t, w, tmp, "...")
@@ -670,6 +672,8 @@ func TestRecursive(t *testing.T) {
 			CREATE   "/one-rename/file"
 			CREATE   "/one-rename/two/three/file"
 		`},
+
+		// TODO: rest that Remove doesn't keep watching stuff
 	}
 
 	for _, tt := range tests {
