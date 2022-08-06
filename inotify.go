@@ -396,7 +396,7 @@ func (w *Watcher) newEvent(name string, mask uint32) Event {
 					// TODO: not sure if this has a nice error message.
 					//       Also, this path could have been removed by now;
 					//       should probably filter ENOENT or something.
-					w.Errors <- err
+					w.sendError(err)
 				}
 			}
 		}
@@ -420,7 +420,7 @@ func (w *Watcher) newEvent(name string, mask uint32) Event {
 			// 		// TODO: not sure if this has a nice error message.
 			// 		//       Also, this path could have been removed by now;
 			// 		//       should probably filter ENOENT or something.
-			// 		w.Errors <- err
+			// w.sendError(err)
 			// 	}
 			// }
 		}
