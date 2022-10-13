@@ -57,10 +57,15 @@ func (w *Watcher) Add(name string) error {
 
 // Remove stops monitoring the path for changes.
 //
-// Directories are always removed non-recursively. For example, if you added
-// /tmp/dir and /tmp/dir/subdir then you will need to remove both.
+// Directories are removed non-recursively. For example, if you added /tmp/dir
+// and /tmp/dir/subdir then you will need to remove both.
 //
-// Removing a path that has not yet been added returns [ErrNonExistentWatch].
+// If the path ends with "/..." the watches are removed recursively; for example
+// Remove("path/...") will remove the watch for "path" and any watches under
+// "path", at any level (if any).
+//
+// Removing a path that is not watched or a "/..." pattern that matches no
+// watches returns [ErrNonExistentWatch].
 func (w *Watcher) Remove(name string) error {
 	return nil
 }

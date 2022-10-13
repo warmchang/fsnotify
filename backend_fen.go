@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -254,21 +255,62 @@ func (w *Watcher) Add(name string) error {
 
 // Remove stops monitoring the path for changes.
 //
-// Directories are always removed non-recursively. For example, if you added
-// /tmp/dir and /tmp/dir/subdir then you will need to remove both.
+// Directories are removed non-recursively. For example, if you added /tmp/dir
+// and /tmp/dir/subdir then you will need to remove both.
 //
-// Removing a path that has not yet been added returns [ErrNonExistentWatch].
+// If the path ends with "/..." the watches are removed recursively; for example
+// Remove("path/...") will remove the watch for "path" and any watches under
+// "path", at any level (if any).
+//
+// Removing a path that is not watched or a "/..." pattern that matches no
+// watches returns [ErrNonExistentWatch].
 func (w *Watcher) Remove(name string) error {
 	if w.isClosed() {
 		return errors.New("FEN watcher already closed")
 	}
-	if !w.port.PathIsWatched(name) {
+
+	name, recurse := recursivePath(filepath.Clean(name))
+	exactmatch := w.port.PathIsWatched(name)
+
+	if !exactmatch && !recurse {
 		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
 	}
+	if exactmatch {
+		err := w.remove(name)
+		if err != nil {
+			return err
+		}
+	}
 
-	// The user has expressed an intent. Immediately remove this name
-	// from whichever watch list it might be in. If it's not in there
-	// the delete doesn't cause harm.
+	if recurse {
+		match := make([]string, 0, 4)
+		w.mu.Lock()
+		for k := range w.watches {
+			if strings.HasPrefix(k, name) {
+				match = append(match, k)
+			}
+		}
+		w.mu.Unlock()
+
+		for _, k := range match {
+			err := w.remove(k)
+			if err != nil {
+				return err
+			}
+		}
+
+		if len(match) == 0 && !exactmatch {
+			return fmt.Errorf("%w: %s/... matched no watches", ErrNonExistentWatch, name)
+		}
+	}
+	return nil
+}
+
+// Locks!
+func (w *Watcher) remove(name string) error {
+	// The user has expressed an intent. Immediately remove this name from
+	// whichever watch list it might be in. If it's not in there the delete
+	// doesn't cause harm.
 	w.mu.Lock()
 	delete(w.watches, name)
 	delete(w.dirs, name)
@@ -288,12 +330,7 @@ func (w *Watcher) Remove(name string) error {
 		return nil
 	}
 
-	err = w.port.DissociatePath(name)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return w.port.DissociatePath(name)
 }
 
 // readEvents contains the main loop that runs in a goroutine watching for events.

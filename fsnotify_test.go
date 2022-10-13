@@ -646,7 +646,7 @@ func TestWatchAttrib(t *testing.T) {
 	}
 }
 
-func TestWatchRm(t *testing.T) {
+func TestWatchRemove(t *testing.T) {
 	tests := []testCase{
 		{"remove watched file", func(t *testing.T, w *Watcher, tmp string) {
 			file := filepath.Join(tmp, "file")
@@ -721,6 +721,37 @@ func TestWatchRm(t *testing.T) {
 			windows:
 				remove         /file
 				remove         /
+		`},
+
+		{"remove recursive", func(t *testing.T, w *Watcher, tmp string) {
+			dir := filepath.Join(tmp, "dir")
+			file := filepath.Join(tmp, "file")
+
+			mkdir(t, dir)
+			touch(t, file)
+
+			addWatch(t, w, tmp)
+			addWatch(t, w, file)
+
+			if err := w.Remove(filepath.Join(tmp, "...")); err != nil {
+				t.Fatal(err)
+			}
+
+			if l := w.WatchList(); len(l) != 0 {
+				t.Errorf("WatchList not empty: %v", l)
+			}
+
+			cat(t, "XX", file)
+		}, `
+			# We expect zero events.
+		`},
+
+		{"remove recursive without matches", func(t *testing.T, w *Watcher, tmp string) {
+			if err := w.Remove(filepath.Join(tmp, "...")); !errors.Is(err, ErrNonExistentWatch) {
+				t.Fatalf("wrong error: %#v\n", err)
+			}
+		}, `
+			# We expect zero events.
 		`},
 	}
 

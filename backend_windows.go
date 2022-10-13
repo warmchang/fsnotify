@@ -121,7 +121,7 @@ type Watcher struct {
 	quit  chan chan<- error
 
 	mu       sync.Mutex // Protects access to watches, isClosed
-	watches  watchMap   // Map of watches (key: i-number)
+	watches  watchMap   // Map of watches volume → file-index → watch
 	isClosed bool       // Set to true when Close() is first called
 }
 
@@ -239,15 +239,25 @@ func (w *Watcher) Add(name string) error {
 
 // Remove stops monitoring the path for changes.
 //
-// Directories are always removed non-recursively. For example, if you added
-// /tmp/dir and /tmp/dir/subdir then you will need to remove both.
+// Directories are removed non-recursively. For example, if you added /tmp/dir
+// and /tmp/dir/subdir then you will need to remove both.
 //
-// Removing a path that has not yet been added returns [ErrNonExistentWatch].
+// If the path ends with "/..." the watches are removed recursively; for example
+// Remove("path/...") will remove the watch for "path" and any watches under
+// "path", at any level (if any).
+//
+// Removing a path that is not watched or a "/..." pattern that matches no
+// watches returns [ErrNonExistentWatch].
 func (w *Watcher) Remove(name string) error {
+	name, recurse := recursivePath(filepath.Clean(name))
+
 	in := &input{
 		op:    opRemoveWatch,
-		path:  filepath.Clean(name),
+		path:  name,
 		reply: make(chan error),
+	}
+	if recurse {
+		in.recurse = true
 	}
 	w.input <- in
 	if err := w.wakeupReader(); err != nil {
@@ -278,16 +288,16 @@ func (w *Watcher) WatchList() []string {
 //
 // This should all be removed at some point, and just use windows.FILE_NOTIFY_*
 const (
-	sysFSALLEVENTS  = 0xfff
-	sysFSATTRIB     = 0x4
-	sysFSCREATE     = 0x100
-	sysFSDELETE     = 0x200
-	sysFSDELETESELF = 0x400
-	sysFSMODIFY     = 0x2
-	sysFSMOVE       = 0xc0
-	sysFSMOVEDFROM  = 0x40
-	sysFSMOVEDTO    = 0x80
-	sysFSMOVESELF   = 0x800
+	sysFSALLEVENTS  = 0x0fff
+	sysFSATTRIB     = 0x0004
+	sysFSCREATE     = 0x0100
+	sysFSDELETE     = 0x0200
+	sysFSDELETESELF = 0x0400
+	sysFSMODIFY     = 0x0002
+	sysFSMOVE       = 0x00c0
+	sysFSMOVEDFROM  = 0x0040
+	sysFSMOVEDTO    = 0x0080
+	sysFSMOVESELF   = 0x0800
 	sysFSIGNORED    = 0x8000
 )
 
@@ -321,14 +331,16 @@ const (
 )
 
 type input struct {
-	op    int
-	path  string
-	flags uint32
-	reply chan error
+	op      int
+	path    string
+	flags   uint32
+	recurse bool
+	reply   chan error
 }
 
 type inode struct {
 	handle windows.Handle
+	dir    string
 	volume uint32
 	index  uint64
 }
@@ -344,11 +356,12 @@ type watch struct {
 }
 
 type (
-	indexMap map[uint64]*watch
-	watchMap map[uint32]indexMap
+	indexMap map[uint64]*watch   // file-index → watch
+	watchMap map[uint32]indexMap // volume → file-index → watch
 )
 
 func (w *Watcher) wakeupReader() error {
+	// Posts an I/O completion packet to an I/O completion port.
 	err := windows.PostQueuedCompletionStatus(w.port, 0, 0, nil)
 	if err != nil {
 		return os.NewSyscallError("PostQueuedCompletionStatus", err)
@@ -356,22 +369,22 @@ func (w *Watcher) wakeupReader() error {
 	return nil
 }
 
-func (w *Watcher) getDir(pathname string) (dir string, err error) {
-	attr, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(pathname))
+// Get the "inode" of the directory path is in, or the path itself if path is
+// already a directory.
+func (w *Watcher) getIno(path string) (*inode, error) {
+	// Get directory.
+	attr, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(path))
 	if err != nil {
-		return "", os.NewSyscallError("GetFileAttributes", err)
+		return nil, os.NewSyscallError("GetFileAttributes", err)
 	}
-	if attr&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		dir = pathname
-	} else {
-		dir, _ = filepath.Split(pathname)
+	dir := path
+	if attr&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		dir, _ = filepath.Split(path)
 		dir = filepath.Clean(dir)
 	}
-	return
-}
 
-func (w *Watcher) getIno(path string) (ino *inode, err error) {
-	h, err := windows.CreateFile(windows.StringToUTF16Ptr(path),
+	// CreateFile opens a directory for reading here. Herp derp.
+	h, err := windows.CreateFile(windows.StringToUTF16Ptr(dir),
 		windows.FILE_LIST_DIRECTORY,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING,
@@ -386,12 +399,13 @@ func (w *Watcher) getIno(path string) (ino *inode, err error) {
 		windows.CloseHandle(h)
 		return nil, os.NewSyscallError("GetFileInformationByHandle", err)
 	}
-	ino = &inode{
+
+	return &inode{
 		handle: h,
+		dir:    dir,
 		volume: fi.VolumeSerialNumber,
 		index:  uint64(fi.FileIndexHigh)<<32 | uint64(fi.FileIndexLow),
-	}
-	return ino, nil
+	}, nil
 }
 
 // Must run within the I/O thread.
@@ -413,16 +427,12 @@ func (m watchMap) set(ino *inode, watch *watch) {
 }
 
 // Must run within the I/O thread.
-func (w *Watcher) addWatch(pathname string, flags uint64) error {
-	dir, err := w.getDir(pathname)
+func (w *Watcher) addWatch(name string, flags uint64) error {
+	ino, err := w.getIno(name)
 	if err != nil {
 		return err
 	}
 
-	ino, err := w.getIno(dir)
-	if err != nil {
-		return err
-	}
 	w.mu.Lock()
 	watchEntry := w.watches.get(ino)
 	w.mu.Unlock()
@@ -434,7 +444,7 @@ func (w *Watcher) addWatch(pathname string, flags uint64) error {
 		}
 		watchEntry = &watch{
 			ino:   ino,
-			path:  dir,
+			path:  ino.dir,
 			names: make(map[string]uint64),
 		}
 		w.mu.Lock()
@@ -444,10 +454,10 @@ func (w *Watcher) addWatch(pathname string, flags uint64) error {
 	} else {
 		windows.CloseHandle(ino.handle)
 	}
-	if pathname == dir {
+	if name == ino.dir {
 		watchEntry.mask |= flags
 	} else {
-		watchEntry.names[filepath.Base(pathname)] |= flags
+		watchEntry.names[filepath.Base(name)] |= flags
 	}
 
 	err = w.startRead(watchEntry)
@@ -455,23 +465,53 @@ func (w *Watcher) addWatch(pathname string, flags uint64) error {
 		return err
 	}
 
-	if pathname == dir {
+	if name == ino.dir {
 		watchEntry.mask &= ^provisional
 	} else {
-		watchEntry.names[filepath.Base(pathname)] &= ^provisional
+		watchEntry.names[filepath.Base(name)] &= ^provisional
 	}
 	return nil
 }
 
 // Must run within the I/O thread.
-func (w *Watcher) remWatch(pathname string) error {
-	dir, err := w.getDir(pathname)
+func (w *Watcher) removeWatch(name string, recurse bool) error {
+	exactmatch, err := w.remove(name)
 	if err != nil {
 		return err
 	}
-	ino, err := w.getIno(dir)
+	if !exactmatch && !recurse {
+		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
+	}
+
+	if recurse {
+		found := false
+		// This is kind of a meh data structure :-/
+		for _, v := range w.watches {
+			for _, v2 := range v {
+				for k := range v2.names {
+					if strings.HasPrefix(k, name) {
+						found = true
+						_, err := w.remove(k)
+						if err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+
+		if !found && !exactmatch {
+			return fmt.Errorf("%w: %s/... matched no watches", ErrNonExistentWatch, name)
+		}
+	}
+	return nil
+}
+
+// Must run within the I/O thread.
+func (w *Watcher) remove(name string) (bool, error) {
+	ino, err := w.getIno(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	w.mu.Lock()
@@ -483,18 +523,19 @@ func (w *Watcher) remWatch(pathname string) error {
 		w.sendError(os.NewSyscallError("CloseHandle", err))
 	}
 	if watch == nil {
-		return fmt.Errorf("%w: %s", ErrNonExistentWatch, pathname)
+		return false, nil
 	}
-	if pathname == dir {
+
+	if name == ino.dir {
 		w.sendEvent(watch.path, watch.mask&sysFSIGNORED)
 		watch.mask = 0
 	} else {
-		name := filepath.Base(pathname)
+		name := filepath.Base(name)
 		w.sendEvent(filepath.Join(watch.path, name), watch.names[name]&sysFSIGNORED)
 		delete(watch.names, name)
 	}
 
-	return w.startRead(watch)
+	return true, w.startRead(watch)
 }
 
 // Must run within the I/O thread.
@@ -520,6 +561,7 @@ func (w *Watcher) startRead(watch *watch) error {
 		w.sendError(os.NewSyscallError("CancelIo", err))
 		w.deleteWatch(watch)
 	}
+
 	mask := w.toWindowsFlags(watch.mask)
 	for _, m := range watch.names {
 		mask |= w.toWindowsFlags(m)
@@ -529,6 +571,7 @@ func (w *Watcher) startRead(watch *watch) error {
 		if err != nil {
 			w.sendError(os.NewSyscallError("CloseHandle", err))
 		}
+
 		w.mu.Lock()
 		delete(w.watches[watch.ino.volume], watch.ino.index)
 		w.mu.Unlock()
@@ -551,8 +594,9 @@ func (w *Watcher) startRead(watch *watch) error {
 	return nil
 }
 
-// readEvents reads from the I/O completion port, converts the
-// received events into Event objects and sends them via the Events channel.
+// read from the I/O completion port, convert the received events into Event
+// objects and send them via the Events channel.
+//
 // Entry point to the I/O thread.
 func (w *Watcher) readEvents() {
 	var (
@@ -597,7 +641,7 @@ func (w *Watcher) readEvents() {
 				case opAddWatch:
 					in.reply <- w.addWatch(in.path, uint64(in.flags))
 				case opRemoveWatch:
-					in.reply <- w.remWatch(in.path)
+					in.reply <- w.removeWatch(in.path, in.recurse)
 				}
 			default:
 			}
@@ -609,9 +653,9 @@ func (w *Watcher) readEvents() {
 			if watch == nil {
 				w.sendError(errors.New("ERROR_MORE_DATA has unexpectedly null lpOverlapped buffer"))
 			} else {
-				// The i/o succeeded but the buffer is full.
-				// In theory we should be building up a full packet.
-				// In practice we can get away with just carrying on.
+				// The i/o succeeded but the buffer is full. In theory we should
+				// be building up a full packet. In practice we can get away
+				// with just carrying on.
 				n = uint32(unsafe.Sizeof(watch.buf))
 			}
 		case windows.ERROR_ACCESS_DENIED:

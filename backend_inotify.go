@@ -269,35 +269,57 @@ func (w *Watcher) Add(name string) error {
 
 // Remove stops monitoring the path for changes.
 //
-// Directories are always removed non-recursively. For example, if you added
-// /tmp/dir and /tmp/dir/subdir then you will need to remove both.
+// Directories are removed non-recursively. For example, if you added /tmp/dir
+// and /tmp/dir/subdir then you will need to remove both.
 //
-// Removing a path that has not yet been added returns [ErrNonExistentWatch].
+// If the path ends with "/..." the watches are removed recursively; for example
+// Remove("path/...") will remove the watch for "path" and any watches under
+// "path", at any level (if any).
+//
+// Removing a path that is not watched or a "/..." pattern that matches no
+// watches returns [ErrNonExistentWatch].
 func (w *Watcher) Remove(name string) error {
-	name = filepath.Clean(name)
+	name, recurse := recursivePath(filepath.Clean(name))
 
-	// Fetch the watch.
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	watch, ok := w.watches[name]
 
-	// Remove it from inotify.
-	if !ok {
+	watch, exactmatch := w.watches[name]
+	if !exactmatch && !recurse {
 		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
 	}
+	if exactmatch {
+		err := w.remove(name, watch)
+		if err != nil {
+			return err
+		}
+	}
 
-	// We successfully removed the watch if InotifyRmWatch doesn't return an
-	// error, we need to clean up our internal state to ensure it matches
-	// inotify's kernel state.
+	if recurse {
+		found := false
+		for k, v := range w.watches {
+			if strings.HasPrefix(k, name) {
+				found = true
+				err := w.remove(k, v)
+				if err != nil {
+					return err
+				}
+			}
+		}
+
+		if !found && !exactmatch {
+			return fmt.Errorf("%w: %s/... matched no watches", ErrNonExistentWatch, name)
+		}
+	}
+
+	return nil
+}
+
+// Doesn't lock!
+func (w *Watcher) remove(name string, watch *watch) error {
 	delete(w.paths, int(watch.wd))
 	delete(w.watches, name)
 
-	// inotify_rm_watch will return EINVAL if the file has been deleted;
-	// the inotify will already have been removed.
-	// watches and pathes are deleted in ignoreLinux() implicitly and asynchronously
-	// by calling inotify_rm_watch() below. e.g. readEvents() goroutine receives IN_IGNORE
-	// so that EINVAL means that the wd is being rm_watch()ed or its file removed
-	// by another thread and we have not received IN_IGNORE event.
 	success, errno := unix.InotifyRmWatch(w.fd, watch.wd)
 	if success == -1 {
 		// TODO: Perhaps it's not helpful to return an error here in every case;
@@ -312,7 +334,6 @@ func (w *Watcher) Remove(name string) error {
 		//         are watching is deleted.
 		return errno
 	}
-
 	return nil
 }
 

@@ -8,6 +8,7 @@ package fsnotify
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -78,4 +79,13 @@ func (e Event) Has(op Op) bool { return e.Op.Has(op) }
 // String returns a string representation of the event with their path.
 func (e Event) String() string {
 	return fmt.Sprintf("%-13s %q", e.Op.String(), e.Name)
+}
+
+// Check if this path is recursive (ends with "/..."), and return the path with
+// the /... stripped.
+func recursivePath(path string) (string, bool) {
+	if filepath.Base(path) == "..." {
+		return filepath.Dir(path), true
+	}
+	return path, false
 }

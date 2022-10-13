@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"golang.org/x/sys/unix"
@@ -277,19 +278,64 @@ func (w *Watcher) Add(name string) error {
 
 // Remove stops monitoring the path for changes.
 //
-// Directories are always removed non-recursively. For example, if you added
-// /tmp/dir and /tmp/dir/subdir then you will need to remove both.
+// Directories are removed non-recursively. For example, if you added /tmp/dir
+// and /tmp/dir/subdir then you will need to remove both.
 //
-// Removing a path that has not yet been added returns [ErrNonExistentWatch].
+// If the path ends with "/..." the watches are removed recursively; for example
+// Remove("path/...") will remove the watch for "path" and any watches under
+// "path", at any level (if any).
+//
+// Removing a path that is not watched or a "/..." pattern that matches no
+// watches returns [ErrNonExistentWatch].
 func (w *Watcher) Remove(name string) error {
-	name = filepath.Clean(name)
+	name, recurse := recursivePath(filepath.Clean(name))
+
 	w.mu.Lock()
-	watchfd, ok := w.watches[name]
+	watchfd, exactmatch := w.watches[name]
 	w.mu.Unlock()
-	if !ok {
+	if !exactmatch && !recurse {
 		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
 	}
+	if exactmatch {
+		err := w.remove(name, watchfd)
+		if err != nil {
+			return err
+		}
+	}
 
+	if recurse {
+		match := make([]struct {
+			name    string
+			watchfd int
+		}, 0, 4)
+		w.mu.Lock()
+		for k := range w.watches {
+			if strings.HasPrefix(k, name) {
+				match = append(match, struct {
+					name    string
+					watchfd int
+				}{name, watchfd})
+			}
+		}
+		w.mu.Unlock()
+
+		for _, v := range match {
+			err := w.remove(v.name, v.watchfd)
+			if err != nil {
+				return err
+			}
+		}
+
+		if len(match) == 0 && !exactmatch {
+			return fmt.Errorf("%w: %s/... matched no watches", ErrNonExistentWatch, name)
+		}
+	}
+
+	return nil
+}
+
+// Locks!
+func (w *Watcher) remove(name string, watchfd int) error {
 	err := w.register([]int{watchfd}, unix.EV_DELETE, 0)
 	if err != nil {
 		return err
@@ -332,7 +378,6 @@ func (w *Watcher) Remove(name string) error {
 			w.Remove(name)
 		}
 	}
-
 	return nil
 }
 
