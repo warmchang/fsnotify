@@ -1,0 +1,36 @@
+linux_task:
+  name: Linux arm64
+  image: golang:latest
+  timeout_in: 20m
+  test_script:
+    - go test -race ./...
+
+freebsd_task:
+  name: FreeBSD
+  matrix:
+    - name: FreeBSD 13.1
+      freebsd_instance:
+        image_family: freebsd-13-1
+    - name: FreeBSD 12.3
+      freebsd_instance:
+        image_family: freebsd-12-3
+  timeout_in: 20m
+  install_script:
+    - pkg update -f
+    - pkg install -y go
+  test_script:
+      # run tests as user "cirrus" instead of root
+    - pw useradd cirrus -m
+    - chown -R cirrus:cirrus .
+    - sudo -u go test -race ./...
+
+macos_task:
+  name: macOS m1
+  macos_instance:
+    image: ghcr.io/cirruslabs/macos-ventura-xcode:latest
+  timeout_in: 20m
+  install_script:
+    - brew update
+    - brew install go
+  test_script:
+    - go test -race ./...
