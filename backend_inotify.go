@@ -524,19 +524,19 @@ func (w *Watcher) newEvent(name string, mask uint32) Event {
 	if mask&unix.IN_MOVE_SELF == unix.IN_MOVE_SELF || mask&unix.IN_MOVED_FROM == unix.IN_MOVED_FROM {
 		e.Op |= Rename
 
-		if mask&unix.IN_ISDIR == unix.IN_ISDIR {
-			// TODO: should probably remove some things as well.
-			// ww := w.isRecursive(name)
-			// if ww != nil {
-			// 	err := w.Add(filepath.Join(name, "..."))
-			// 	if err != nil {
-			// 		// TODO: not sure if this has a nice error message.
-			// 		//       Also, this path could have been removed by now;
-			// 		//       should probably filter ENOENT or something.
-			// w.sendError(err)
-			// 	}
-			// }
-		}
+		//if mask&unix.IN_ISDIR == unix.IN_ISDIR {
+		// TODO: should probably remove some things as well.
+		// ww := w.isRecursive(name)
+		// if ww != nil {
+		// 	err := w.Add(filepath.Join(name, "..."))
+		// 	if err != nil {
+		// 		// TODO: not sure if this has a nice error message.
+		// 		//       Also, this path could have been removed by now;
+		// 		//       should probably filter ENOENT or something.
+		// w.sendError(err)
+		// 	}
+		// }
+		//}
 	}
 	if mask&unix.IN_ATTRIB == unix.IN_ATTRIB {
 		e.Op |= Chmod
