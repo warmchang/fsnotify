@@ -478,6 +478,9 @@ func (w *Watcher) readEvents() {
 //
 // Returns the watch for the path, or nil.
 func (w *Watcher) isRecursive(path string) *watch {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	ww, ok := w.watches[path]
 	if !ok {
 		// path could be a file, so also check the Dir.

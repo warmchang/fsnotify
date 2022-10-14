@@ -223,6 +223,11 @@ func (w *Watcher) Add(name string) error {
 		return nil
 	}
 
+	_, recurse := recursivePath(name)
+	if recurse {
+		return ErrRecursionUnsupported
+	}
+
 	// Currently we resolve symlinks that were explicitly requested to be
 	// watched. Otherwise we would use LStat here.
 	stat, err := os.Stat(name)
