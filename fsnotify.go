@@ -1,7 +1,3 @@
-// Copyright 2012 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 //go:build !plan9
 // +build !plan9
 
@@ -17,7 +13,7 @@ import (
 	"strings"
 )
 
-// Event represents a single file system notification.
+// Event represents a file system notification.
 type Event struct {
 	// Path to the file or directory.
 	//
@@ -28,15 +24,16 @@ type Event struct {
 
 	// File operation that triggered the event.
 	//
-	// This is a bitmask as some systems may send multiple operations at once.
-	// Use the Op.Has() or Event.Has() method instead of comparing with ==.
+	// This is a bitmask and some systems may send multiple operations at once.
+	// Use the Event.Has() method instead of comparing with ==.
 	Op Op
 }
 
 // Op describes a set of file operations.
 type Op uint32
 
-// These are the generalized file operations that can trigger a notification.
+// The operations fsnotify can trigger; see the documentation on [Watcher] for a
+// full description, and check them with [Event.Has].
 const (
 	Create Op = 1 << iota
 	Write
@@ -47,31 +44,31 @@ const (
 
 // Common errors that can be reported by a watcher
 var (
-	ErrNonExistentWatch     = errors.New("can't remove non-existent watcher")
-	ErrEventOverflow        = errors.New("fsnotify queue overflow")
-	ErrNotDirectory         = errors.New("not a directory")
+	ErrNonExistentWatch     = errors.New("fsnotify: can't remove non-existent watcher")
+	ErrEventOverflow        = errors.New("fsnotify: queue overflow")
+	ErrClosed               = errors.New("fsnotify: watcher already closed")
 	ErrRecursionUnsupported = errors.New("recursion not supported")
 )
 
-func (op Op) String() string {
+func (o Op) String() string {
 	var b strings.Builder
-	if op.Has(Create) {
+	if o.Has(Create) {
 		b.WriteString("|CREATE")
 	}
-	if op.Has(Remove) {
+	if o.Has(Remove) {
 		b.WriteString("|REMOVE")
 	}
-	if op.Has(Write) {
+	if o.Has(Write) {
 		b.WriteString("|WRITE")
 	}
-	if op.Has(Rename) {
+	if o.Has(Rename) {
 		b.WriteString("|RENAME")
 	}
-	if op.Has(Chmod) {
+	if o.Has(Chmod) {
 		b.WriteString("|CHMOD")
 	}
 	if b.Len() == 0 {
-		return ""
+		return "[no events]"
 	}
 	return b.String()[1:]
 }
@@ -82,10 +79,9 @@ func (o Op) Has(h Op) bool { return o&h == h }
 // Has reports if this event has the given operation.
 func (e Event) Has(op Op) bool { return e.Op.Has(op) }
 
-// String returns a string representation of the event in the form
-// "file: REMOVE|WRITE|..."
+// String returns a string representation of the event with their path.
 func (e Event) String() string {
-	return fmt.Sprintf("%q: %s", e.Name, e.Op.String())
+	return fmt.Sprintf("%-13s %q", e.Op.String(), e.Name)
 }
 
 // findDirs finds all directories under path (return value *includes* path as

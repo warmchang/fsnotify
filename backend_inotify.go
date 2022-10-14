@@ -1,7 +1,3 @@
-// Copyright 2010 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 //go:build linux
 // +build linux
 
@@ -20,13 +16,108 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Watcher watches a set of files, delivering events to a channel.
+// Watcher watches a set of paths, delivering events on a channel.
+//
+// A watcher should not be copied (e.g. pass it by pointer, rather than by
+// value).
+//
+// # Linux notes
+//
+// When a file is removed a Remove event won't be emitted until all file
+// descriptors are closed, and deletes will always emit a Chmod. For example:
+//
+//     fp := os.Open("file")
+//     os.Remove("file")        // Triggers Chmod
+//     fp.Close()               // Triggers Remove
+//
+// This is the event that inotify sends, so not much can be changed about this.
+//
+// The fs.inotify.max_user_watches sysctl variable specifies the upper limit
+// for the number of watches per user, and fs.inotify.max_user_instances
+// specifies the maximum number of inotify instances per user. Every Watcher you
+// create is an "instance", and every path you add is a "watch".
+//
+// These are also exposed in /proc as /proc/sys/fs/inotify/max_user_watches and
+// /proc/sys/fs/inotify/max_user_instances
+//
+// To increase them you can use sysctl or write the value to the /proc file:
+//
+//     # Default values on Linux 5.18
+//     sysctl fs.inotify.max_user_watches=124983
+//     sysctl fs.inotify.max_user_instances=128
+//
+// To make the changes persist on reboot edit /etc/sysctl.conf or
+// /usr/lib/sysctl.d/50-default.conf (details differ per Linux distro; check
+// your distro's documentation):
+//
+//     fs.inotify.max_user_watches=124983
+//     fs.inotify.max_user_instances=128
+//
+// Reaching the limit will result in a "no space left on device" or "too many open
+// files" error.
+//
+// # kqueue notes (macOS, BSD)
+//
+// kqueue requires opening a file descriptor for every file that's being watched;
+// so if you're watching a directory with five files then that's six file
+// descriptors. You will run in to your system's "max open files" limit faster on
+// these platforms.
+//
+// The sysctl variables kern.maxfiles and kern.maxfilesperproc can be used to
+// control the maximum number of open files, as well as /etc/login.conf on BSD
+// systems.
+//
+// # macOS notes
+//
+// Spotlight indexing on macOS can result in multiple events (see [#15]). A
+// temporary workaround is to add your folder(s) to the "Spotlight Privacy
+// Settings" until we have a native FSEvents implementation (see [#11]).
+//
+// [#11]: https://github.com/fsnotify/fsnotify/issues/11
+// [#15]: https://github.com/fsnotify/fsnotify/issues/15
 type Watcher struct {
+	// Events sends the filesystem change events.
+	//
+	// fsnotify can send the following events; a "path" here can refer to a
+	// file, directory, symbolic link, or special file like a FIFO.
+	//
+	//   fsnotify.Create    A new path was created; this may be followed by one
+	//                      or more Write events if data also gets written to a
+	//                      file.
+	//
+	//   fsnotify.Remove    A path was removed.
+	//
+	//   fsnotify.Rename    A path was renamed. A rename is always sent with the
+	//                      old path as Event.Name, and a Create event will be
+	//                      sent with the new name. Renames are only sent for
+	//                      paths that are currently watched; e.g. moving an
+	//                      unmonitored file into a monitored directory will
+	//                      show up as just a Create. Similarly, renaming a file
+	//                      to outside a monitored directory will show up as
+	//                      only a Rename.
+	//
+	//   fsnotify.Write     A file or named pipe was written to. A Truncate will
+	//                      also trigger a Write. A single "write action"
+	//                      initiated by the user may show up as one or multiple
+	//                      writes, depending on when the system syncs things to
+	//                      disk. For example when compiling a large Go program
+	//                      you may get hundreds of Write events, so you
+	//                      probably want to wait until you've stopped receiving
+	//                      them (see the dedup example in cmd/fsnotify).
+	//
+	//   fsnotify.Chmod     Attributes were changed. On Linux this is also sent
+	//                      when a file is removed (or more accurately, when a
+	//                      link to an inode is removed). On kqueue it's sent
+	//                      and on kqueue when a file is truncated. On Windows
+	//                      it's never sent.
+	Events chan Event
+
+	// Errors sends any errors.
+	Errors chan error
+
 	// Store fd here as os.File.Read() will no longer return on close after
 	// calling Fd(). See: https://github.com/golang/go/issues/26439
 	fd          int
-	Events      chan Event
-	Errors      chan error
 	mu          sync.Mutex // Map access
 	inotifyFile *os.File
 	watches     map[string]*watch // Map of inotify watches (key: path)
@@ -40,7 +131,7 @@ type watchPath struct {
 	recurse bool
 }
 
-// NewWatcher establishes a new watcher with the underlying OS and begins waiting for events.
+// NewWatcher creates a new Watcher.
 func NewWatcher() (*Watcher, error) {
 	// Create inotify fd
 	// Need to set the FD to nonblocking mode in order for SetDeadline methods to work
@@ -81,8 +172,8 @@ func (w *Watcher) sendError(err error) bool {
 	case w.Errors <- err:
 		return true
 	case <-w.done:
+		return false
 	}
-	return false
 }
 
 func (w *Watcher) isClosed() bool {
@@ -106,7 +197,8 @@ func (w *Watcher) Close() error {
 	close(w.done)
 	w.mu.Unlock()
 
-	// Causes any blocking reads to return with an error, provided the file still supports deadline operations
+	// Causes any blocking reads to return with an error, provided the file
+	// still supports deadline operations.
 	err := w.inotifyFile.Close()
 	if err != nil {
 		return err
@@ -118,17 +210,42 @@ func (w *Watcher) Close() error {
 	return nil
 }
 
-// Add starts watching a file or directory.
+// Add starts monitoring the path for changes.
 //
-// If the path is a directory then changes to that directory are watched
-// non-recursively. If the path ends with "/..." changes in the entire directory
-// tree are watched. ErrNotDirectory is returned when using "/..." on a file.
+// A path can only be watched once; attempting to watch it more than once will
+// return an error. Paths that do not yet exist on the filesystem cannot be
+// added. A watch will be automatically removed if the path is deleted.
 //
-// Symlinks are not followed.
-func (w *Watcher) Add(path string) error {
-	path = filepath.Clean(path)
+// A path will remain watched if it gets renamed to somewhere else on the same
+// filesystem, but the monitor will get removed if the path gets deleted and
+// re-created, or if it's moved to a different filesystem.
+//
+// Notifications on network filesystems (NFS, SMB, FUSE, etc.) or special
+// filesystems (/proc, /sys, etc.) generally don't work.
+//
+// Returns [ErrClosed] if [Watcher.Close] was called.
+//
+// # Watching directories
+//
+// All files in a directory are monitored, including new files that are created
+// after the watcher is started. Subdirectories are not watched (i.e. it's
+// non-recursive).
+//
+// # Watching files
+//
+// Watching individual files (rather than directories) is generally not
+// recommended as many tools update files atomically. Instead of "just" writing
+// to the file a temporary file will be written to first, and if successful the
+// temporary file is moved to to destination removing the original, or some
+// variant thereof. The watcher on the original file is now lost, as it no
+// longer exists.
+//
+// Instead, watch the parent directory and use Event.Name to filter out files
+// you're not interested in. There is an example of this in [cmd/fsnotify/file.go].
+func (w *Watcher) Add(name string) error {
+	name = filepath.Clean(name)
 	if w.isClosed() {
-		return errors.New("inotify instance already closed")
+		return ErrClosed
 	}
 
 	path, recurse := recursivePath(path)
@@ -176,16 +293,18 @@ func (w *Watcher) add(path string, recurse bool) error {
 	return nil
 }
 
-// Remove stops watching a file or directory.
+// Remove stops monitoring the path for changes.
 //
-// If a path was added recursively with "..." then it will stop watching the
-// entire directory tree. You can optionally add "..."; in this case
-// Remove("path") and Remove("path/...") behave identical.
+// Directories are always removed non-recursively. For example, if you added
+// /tmp/dir and /tmp/dir/subdir then you will need to remove both.
 //
-// In other cases adding "..." will any watches in that tree (if any).
-// ErrNotDirectory is returned when using "..." on a file.
-func (w *Watcher) Remove(path string) error {
-	path = filepath.Clean(path)
+// Removing a path that has not yet been added returns [ErrNonExistentWatch].
+func (w *Watcher) Remove(name string) error {
+	if w.isClosed() {
+		return nil
+	}
+
+	name = filepath.Clean(name)
 
 	// Fetch the watch.
 	w.mu.Lock()
@@ -211,20 +330,30 @@ func (w *Watcher) Remove(path string) error {
 	// by another thread and we have not received IN_IGNORE event.
 	success, errno := unix.InotifyRmWatch(w.fd, watch.wd)
 	if success == -1 {
-		// TODO: Perhaps it's not helpful to return an error here in every case.
-		// the only two possible errors are:
-		// EBADF, which happens when w.fd is not a valid file descriptor of any kind.
-		// EINVAL, which is when fd is not an inotify descriptor or wd is not a valid watch descriptor.
-		// Watch descriptors are invalidated when they are removed explicitly or implicitly;
-		// explicitly by inotify_rm_watch, implicitly when the file they are watching is deleted.
+		// TODO: Perhaps it's not helpful to return an error here in every case;
+		//       The only two possible errors are:
+		//
+		//       - EBADF, which happens when w.fd is not a valid file descriptor
+		//         of any kind.
+		//       - EINVAL, which is when fd is not an inotify descriptor or wd
+		//         is not a valid watch descriptor. Watch descriptors are
+		//         invalidated when they are removed explicitly or implicitly;
+		//         explicitly by inotify_rm_watch, implicitly when the file they
+		//         are watching is deleted.
 		return errno
 	}
 
 	return nil
 }
 
-// WatchList returns the directories and files that are being monitered.
+// WatchList returns all paths added with [Add] (and are not yet removed).
+//
+// Returns nil if [Watcher.Close] was called.
 func (w *Watcher) WatchList() []string {
+	if w.isClosed() {
+		return nil
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -244,15 +373,16 @@ type watch struct {
 // readEvents reads from the inotify file descriptor, converts the
 // received events into Event objects and sends them via the Events channel
 func (w *Watcher) readEvents() {
+	defer func() {
+		close(w.doneResp)
+		close(w.Errors)
+		close(w.Events)
+	}()
+
 	var (
 		buf   [unix.SizeofInotifyEvent * 4096]byte // Buffer for a maximum of 4096 raw events
 		errno error                                // Syscall errno
 	)
-
-	defer close(w.doneResp)
-	defer close(w.Errors)
-	defer close(w.Events)
-
 	for {
 		// See if we have been closed.
 		if w.isClosed() {

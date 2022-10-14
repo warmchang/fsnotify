@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify/internal"
 )
 
 type testCase struct {
@@ -20,7 +22,9 @@ type testCase struct {
 }
 
 func (tt testCase) run(t *testing.T) {
+	t.Helper()
 	t.Run(tt.name, func(t *testing.T) {
+		t.Helper()
 		t.Parallel()
 		tmp := t.TempDir()
 
@@ -55,12 +59,12 @@ func newWatcher(t *testing.T, add ...string) *Watcher {
 }
 
 // addWatch adds a watch for a directory
-func addWatch(t *testing.T, watcher *Watcher, path ...string) {
+func addWatch(t *testing.T, w *Watcher, path ...string) {
 	t.Helper()
 	if len(path) < 1 {
 		t.Fatalf("addWatch: path must have at least one element: %s", path)
 	}
-	err := watcher.Add(filepath.Join(path...))
+	err := w.Add(filepath.Join(path...))
 	if err != nil {
 		t.Fatalf("addWatch(%q): %s", filepath.Join(path...), err)
 	}
@@ -76,6 +80,46 @@ func shouldWait(path ...string) bool {
 		}
 	}
 	return true
+}
+
+// Create n empty files with the prefix in the directory dir.
+func createFiles(t *testing.T, dir, prefix string, n int, d time.Duration) int {
+	t.Helper()
+
+	if d == 0 {
+		d = 9 * time.Minute
+	}
+
+	fmtNum := func(n int) string {
+		s := fmt.Sprintf("%09d", n)
+		return s[:3] + "_" + s[3:6] + "_" + s[6:]
+	}
+
+	var (
+		max     = time.After(d)
+		created int
+	)
+	for i := 0; i < n; i++ {
+		select {
+		case <-max:
+			t.Logf("createFiles: stopped at %s files because it took longer than %s", fmtNum(created), d)
+			return created
+		default:
+			fp, err := os.Create(filepath.Join(dir, prefix+fmtNum(i)))
+			if err != nil {
+				t.Errorf("create failed for %s: %s", fmtNum(i), err)
+				continue
+			}
+			if err := fp.Close(); err != nil {
+				t.Errorf("close failed for %s: %s", fmtNum(i), err)
+			}
+			if i%10_000 == 0 {
+				t.Logf("createFiles: %s", fmtNum(i))
+			}
+			created++
+		}
+	}
+	return created
 }
 
 // mkdir
@@ -119,6 +163,36 @@ func symlink(t *testing.T, target string, link ...string) {
 		t.Fatalf("symlink(%q, %q): %s", target, filepath.Join(link...), err)
 	}
 	if shouldWait(link...) {
+		eventSeparator()
+	}
+}
+
+// mkfifo
+func mkfifo(t *testing.T, path ...string) {
+	t.Helper()
+	if len(path) < 1 {
+		t.Fatalf("mkfifo: path must have at least one element: %s", path)
+	}
+	err := internal.Mkfifo(filepath.Join(path...), 0o644)
+	if err != nil {
+		t.Fatalf("mkfifo(%q): %s", filepath.Join(path...), err)
+	}
+	if shouldWait(path...) {
+		eventSeparator()
+	}
+}
+
+// mknod
+func mknod(t *testing.T, dev int, path ...string) {
+	t.Helper()
+	if len(path) < 1 {
+		t.Fatalf("mknod: path must have at least one element: %s", path)
+	}
+	err := internal.Mknod(filepath.Join(path...), 0o644, dev)
+	if err != nil {
+		t.Fatalf("mknod(%d, %q): %s", dev, filepath.Join(path...), err)
+	}
+	if shouldWait(path...) {
 		eventSeparator()
 	}
 }
@@ -246,17 +320,26 @@ func chmod(t *testing.T, mode fs.FileMode, path ...string) {
 //
 // events := w.stop(t)
 type eventCollector struct {
-	w      *Watcher
-	events Events
-	mu     sync.Mutex
-	done   chan struct{}
+	w    *Watcher
+	e    Events
+	mu   sync.Mutex
+	done chan struct{}
 }
 
-func newCollector(t *testing.T) *eventCollector {
-	return &eventCollector{w: newWatcher(t), done: make(chan struct{})}
+func newCollector(t *testing.T, add ...string) *eventCollector {
+	return &eventCollector{
+		w:    newWatcher(t, add...),
+		done: make(chan struct{}),
+		e:    make(Events, 0, 8),
+	}
 }
 
+// stop collecting events and return what we've got.
 func (w *eventCollector) stop(t *testing.T) Events {
+	return w.stopWait(t, time.Second)
+}
+
+func (w *eventCollector) stopWait(t *testing.T, waitFor time.Duration) Events {
 	waitForEvents()
 
 	go func() {
@@ -267,16 +350,28 @@ func (w *eventCollector) stop(t *testing.T) Events {
 	}()
 
 	select {
-	case <-time.After(1 * time.Second):
-		t.Fatal("event stream was not closed after 1 second")
+	case <-time.After(waitFor):
+		t.Fatalf("event stream was not closed after %s", waitFor)
 	case <-w.done:
 	}
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.events
+	return w.e
 }
 
+// Get all events we've found up to now and clear the event buffer.
+func (w *eventCollector) events(t *testing.T) Events {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	e := make(Events, len(w.e))
+	copy(e, w.e)
+	w.e = make(Events, 0, 16)
+	return e
+}
+
+// Start collecting events.
 func (w *eventCollector) collect(t *testing.T) {
 	go func() {
 		for {
@@ -294,7 +389,7 @@ func (w *eventCollector) collect(t *testing.T) {
 					return
 				}
 				w.mu.Lock()
-				w.events = append(w.events, e)
+				w.e = append(w.e, e)
 				w.mu.Unlock()
 			}
 		}
@@ -377,6 +472,13 @@ func newEvents(t *testing.T, s string) Events {
 
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
+			if strings.ToUpper(fields[0]) == "EMPTY" {
+				for _, g := range groups {
+					events[g] = Events{}
+				}
+				continue
+			}
+
 			t.Fatalf("newEvents: line %d has less than 2 fields: %s", no, line)
 		}
 
@@ -414,8 +516,14 @@ func newEvents(t *testing.T, s string) Events {
 		return e
 	}
 	switch runtime.GOOS {
+	// kqueue shortcut
 	case "freebsd", "netbsd", "openbsd", "dragonfly", "darwin":
 		if e, ok := events["kqueue"]; ok {
+			return e
+		}
+	// fen shortcut
+	case "solaris", "illumos":
+		if e, ok := events["fen"]; ok {
 			return e
 		}
 	}
@@ -436,6 +544,7 @@ func cmpEvents(t *testing.T, tmp string, have, want Events) {
 	})
 
 	if haveSort.String() != wantSort.String() {
+		//t.Error("\n" + ztest.Diff(indent(haveSort), indent(wantSort)))
 		t.Errorf("\nhave:\n%s\nwant:\n%s", indent(have), indent(want))
 	}
 }
