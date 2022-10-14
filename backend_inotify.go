@@ -248,9 +248,9 @@ func (w *Watcher) Add(name string) error {
 		return ErrClosed
 	}
 
-	path, recurse := recursivePath(path)
+	name, recurse := recursivePath(name)
 	if recurse {
-		dirs, err := findDirs(path)
+		dirs, err := findDirs(name)
 		if err != nil {
 			return err
 		}
@@ -263,7 +263,7 @@ func (w *Watcher) Add(name string) error {
 		return nil
 	}
 
-	return w.add(path, false)
+	return w.add(name, false)
 }
 
 func (w *Watcher) add(path string, recurse bool) error {
@@ -309,18 +309,18 @@ func (w *Watcher) Remove(name string) error {
 	// Fetch the watch.
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	watch, ok := w.watches[path]
+	watch, ok := w.watches[name]
 
 	// Remove it from inotify.
 	if !ok {
-		return fmt.Errorf("%w: %s", ErrNonExistentWatch, path)
+		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
 	}
 
 	// We successfully removed the watch if InotifyRmWatch doesn't return an
 	// error, we need to clean up our internal state to ensure it matches
 	// inotify's kernel state.
 	delete(w.paths, int(watch.wd))
-	delete(w.watches, path)
+	delete(w.watches, name)
 
 	// inotify_rm_watch will return EINVAL if the file has been deleted;
 	// the inotify will already have been removed.

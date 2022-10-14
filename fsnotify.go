@@ -47,6 +47,7 @@ var (
 	ErrNonExistentWatch     = errors.New("fsnotify: can't remove non-existent watcher")
 	ErrEventOverflow        = errors.New("fsnotify: queue overflow")
 	ErrClosed               = errors.New("fsnotify: watcher already closed")
+	ErrNotDirectory         = errors.New("not a directory")
 	ErrRecursionUnsupported = errors.New("recursion not supported")
 )
 
