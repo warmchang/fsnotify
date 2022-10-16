@@ -114,6 +114,12 @@ type Watcher struct {
 	Events chan Event
 
 	// Errors sends any errors.
+	//
+	// [ErrEventOverflow] is used to indicate ther are too many events:
+	//
+	//  - inotify: there are too many queued events (fs.inotify.max_queued_events sysctl)
+	//  - windows: The buffer size is too small.
+	//  - kqueue, fen: not used.
 	Errors chan error
 
 	port  windows.Handle // Handle to completion port
@@ -196,11 +202,11 @@ func (w *Watcher) Close() error {
 //
 // A path can only be watched once; attempting to watch it more than once will
 // return an error. Paths that do not yet exist on the filesystem cannot be
-// added. A watch will be automatically removed if the path is deleted.
+// added.
 //
-// A path will remain watched if it gets renamed to somewhere else on the same
-// filesystem, but the monitor will get removed if the path gets deleted and
-// re-created, or if it's moved to a different filesystem.
+// A watch will be automatically removed if the watched path is deleted or
+// renamed. The exception is the Windows backend, which doesn't remove the
+// watcher on renames.
 //
 // Notifications on network filesystems (NFS, SMB, FUSE, etc.) or special
 // filesystems (/proc, /sys, etc.) generally don't work.
@@ -299,7 +305,6 @@ func (w *Watcher) WatchList() []string {
 // This should all be removed at some point, and just use windows.FILE_NOTIFY_*
 const (
 	sysFSALLEVENTS  = 0xfff
-	sysFSATTRIB     = 0x4
 	sysFSCREATE     = 0x100
 	sysFSDELETE     = 0x200
 	sysFSDELETESELF = 0x400
@@ -324,9 +329,6 @@ func (w *Watcher) newEvent(name string, mask uint32) Event {
 	}
 	if mask&sysFSMOVE == sysFSMOVE || mask&sysFSMOVESELF == sysFSMOVESELF || mask&sysFSMOVEDFROM == sysFSMOVEDFROM {
 		e.Op |= Rename
-	}
-	if mask&sysFSATTRIB == sysFSATTRIB {
-		e.Op |= Chmod
 	}
 	return e
 }
@@ -652,7 +654,7 @@ func (w *Watcher) readEvents() {
 		var offset uint32
 		for {
 			if n == 0 {
-				w.sendError(errors.New("short read in readEvents()"))
+				w.sendError(ErrEventOverflow)
 				break
 			}
 
@@ -739,9 +741,6 @@ func (w *Watcher) toWindowsFlags(mask uint64) uint32 {
 	var m uint32
 	if mask&sysFSMODIFY != 0 {
 		m |= windows.FILE_NOTIFY_CHANGE_LAST_WRITE
-	}
-	if mask&sysFSATTRIB != 0 {
-		m |= windows.FILE_NOTIFY_CHANGE_ATTRIBUTES
 	}
 	if mask&(sysFSMOVE|sysFSCREATE|sysFSDELETE) != 0 {
 		m |= windows.FILE_NOTIFY_CHANGE_FILE_NAME | windows.FILE_NOTIFY_CHANGE_DIR_NAME

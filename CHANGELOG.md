@@ -13,10 +13,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changes and fixes
 
+- inotify: remove watcher if a watched path is renamed ([#518])
+
+  After a rename the reported name wasn't updated, or even an empty string.
+  Inotify doesn't provide any good facilities to update it, so just remove the
+  watcher. This is already how it worked on kqueue and FEN.
+
+  On Windows this does work, and remains working.
+
+- windows: don't listen for file attribute changes ([#520])
+
+  File attribute changes are sent as FILE_ACTION_MODIFIED by the Windows API,
+  with no way to see if they're a file write or attribute change, so would show
+  up as a fsnotify.Write event. This is never useful, and could result in many
+  spurious Write events.
+
+- windows: return ErrEventOverflow if the buffer is full ([#525])
+
+  Before it would merely return "short read", making it hard to detect this
+  error.
+
 - all: return ErrClosed on Add() when the watcher is closed ([#516])
+
 
 [#371]: https://github.com/fsnotify/fsnotify/pull/371
 [#516]: https://github.com/fsnotify/fsnotify/pull/516
+[#518]: https://github.com/fsnotify/fsnotify/pull/518
+[#520]: https://github.com/fsnotify/fsnotify/pull/520
+[#525]: https://github.com/fsnotify/fsnotify/pull/525
 
 ## [1.6.0] - 2022-10-13
 

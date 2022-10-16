@@ -1,8 +1,12 @@
-//go:build !plan9
-// +build !plan9
-
 // Package fsnotify provides a cross-platform interface for file system
 // notifications.
+//
+// Currently supported systems:
+//
+//    Linux 2.6.32+    via inotify
+//    BSD, macOS       via kqueue
+//    Windows          via ReadDirectoryChangesW
+//    illumos          via FEN
 package fsnotify
 
 import (
@@ -42,13 +46,13 @@ const (
 	Chmod
 )
 
-// Common errors that can be reported by a watcher
+// Common errors that can be reported.
 var (
 	ErrNonExistentWatch     = errors.New("fsnotify: can't remove non-existent watcher")
-	ErrEventOverflow        = errors.New("fsnotify: queue overflow")
+	ErrEventOverflow        = errors.New("fsnotify: queue or buffer overflow")
 	ErrClosed               = errors.New("fsnotify: watcher already closed")
-	ErrNotDirectory         = errors.New("not a directory")
-	ErrRecursionUnsupported = errors.New("recursion not supported")
+	ErrNotDirectory         = errors.New("fsnotify: not a directory")
+	ErrRecursionUnsupported = errors.New("fsnotify: recursion not supported")
 )
 
 func (o Op) String() string {

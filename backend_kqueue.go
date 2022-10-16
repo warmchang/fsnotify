@@ -111,6 +111,12 @@ type Watcher struct {
 	Events chan Event
 
 	// Errors sends any errors.
+	//
+	// [ErrEventOverflow] is used to indicate ther are too many events:
+	//
+	//  - inotify: there are too many queued events (fs.inotify.max_queued_events sysctl)
+	//  - windows: The buffer size is too small.
+	//  - kqueue, fen: not used.
 	Errors chan error
 
 	done         chan struct{}
@@ -241,11 +247,11 @@ func (w *Watcher) Close() error {
 //
 // A path can only be watched once; attempting to watch it more than once will
 // return an error. Paths that do not yet exist on the filesystem cannot be
-// added. A watch will be automatically removed if the path is deleted.
+// added.
 //
-// A path will remain watched if it gets renamed to somewhere else on the same
-// filesystem, but the monitor will get removed if the path gets deleted and
-// re-created, or if it's moved to a different filesystem.
+// A watch will be automatically removed if the watched path is deleted or
+// renamed. The exception is the Windows backend, which doesn't remove the
+// watcher on renames.
 //
 // Notifications on network filesystems (NFS, SMB, FUSE, etc.) or special
 // filesystems (/proc, /sys, etc.) generally don't work.
@@ -289,6 +295,10 @@ func (w *Watcher) Add(name string) error {
 //
 // Removing a path that has not yet been added returns [ErrNonExistentWatch].
 func (w *Watcher) Remove(name string) error {
+	return w.remove(name, true)
+}
+
+func (w *Watcher) remove(name string, unwatchFiles bool) error {
 	name = filepath.Clean(name)
 	w.mu.Lock()
 	if w.isClosed {
@@ -326,7 +336,7 @@ func (w *Watcher) Remove(name string) error {
 	w.mu.Unlock()
 
 	// Find all watched paths that are in this directory that are not external.
-	if isDir {
+	if unwatchFiles && isDir {
 		var pathsToRemove []string
 		w.mu.Lock()
 		for fd := range w.watchesByDir[name] {
@@ -337,13 +347,12 @@ func (w *Watcher) Remove(name string) error {
 		}
 		w.mu.Unlock()
 		for _, name := range pathsToRemove {
-			// Since these are internal, not much sense in propagating error
-			// to the user, as that will just confuse them with an error about
-			// a path they did not explicitly watch themselves.
+			// Since these are internal, not much sense in propagating error to
+			// the user, as that will just confuse them with an error about a
+			// path they did not explicitly watch themselves.
 			w.Remove(name)
 		}
 	}
-
 	return nil
 }
 
@@ -373,7 +382,6 @@ const noteAllEvents = unix.NOTE_DELETE | unix.NOTE_WRITE | unix.NOTE_ATTRIB | un
 // Returns the real path to the file which was added, if any, which may be different from the one passed in the case of symlinks.
 func (w *Watcher) addWatch(name string, flags uint32) (string, error) {
 	var isDir bool
-	// Make ./name and name equivalent
 	name = filepath.Clean(name)
 
 	w.mu.Lock()
@@ -529,25 +537,15 @@ func (w *Watcher) readEvents() {
 
 			event := w.newEvent(path.name, mask)
 
-			if path.isDir && !event.Has(Remove) {
-				// Double check to make sure the directory exists. This can
-				// happen when we do a rm -fr on a recursively watched folders
-				// and we receive a modification event first but the folder has
-				// been deleted and later receive the delete event.
-				if _, err := os.Lstat(event.Name); os.IsNotExist(err) {
-					event.Op |= Remove
-				}
-			}
-
 			if event.Has(Rename) || event.Has(Remove) {
-				w.Remove(event.Name)
+				w.remove(event.Name, false)
 				w.mu.Lock()
 				delete(w.fileExists, event.Name)
 				w.mu.Unlock()
 			}
 
 			if path.isDir && event.Has(Write) && !event.Has(Remove) {
-				w.sendDirectoryChangeEvents(event.Name)
+				w.sendDirectoryChangeEvents(event.Name, false)
 			} else {
 				if !w.sendEvent(event) {
 					closed = true
@@ -564,13 +562,7 @@ func (w *Watcher) readEvents() {
 					_, found := w.watches[fileDir]
 					w.mu.Unlock()
 					if found {
-						// make sure the directory exists before we watch for changes. When we
-						// do a recursive watch and perform rm -fr, the parent directory might
-						// have gone missing, ignore the missing directory and let the
-						// upcoming delete event remove the watch from the parent directory.
-						if _, err := os.Lstat(fileDir); err == nil {
-							w.sendDirectoryChangeEvents(fileDir)
-						}
+						w.sendDirectoryChangeEvents(fileDir, true)
 					}
 				} else {
 					filePath := filepath.Clean(event.Name)
@@ -597,6 +589,11 @@ func (w *Watcher) newEvent(name string, mask uint32) Event {
 	}
 	if mask&unix.NOTE_ATTRIB == unix.NOTE_ATTRIB {
 		e.Op |= Chmod
+	}
+	// No point sending a write and delete event at the same time: if it's gone,
+	// then it's gone.
+	if e.Op.Has(Write) && e.Op.Has(Remove) {
+		e.Op &^= Write
 	}
 	return e
 }
@@ -638,16 +635,18 @@ func (w *Watcher) watchDirectoryFiles(dirPath string) error {
 //
 // This functionality is to have the BSD watcher match the inotify, which sends
 // a create event for files created in a watched directory.
-func (w *Watcher) sendDirectoryChangeEvents(dir string) {
-	// Get all files
+func (w *Watcher) sendDirectoryChangeEvents(dir string, ignoreNotExists bool) {
 	files, err := ioutil.ReadDir(dir)
 	if err != nil {
+		// Directory could have been deleted already; just ignore that.
+		if ignoreNotExists && errors.Is(err, os.ErrNotExist) {
+			return
+		}
 		if !w.sendError(fmt.Errorf("fsnotify.sendDirectoryChangeEvents: %w", err)) {
 			return
 		}
 	}
 
-	// Search for new files
 	for _, fi := range files {
 		err := w.sendFileCreatedEventIfNew(filepath.Join(dir, fi.Name()), fi)
 		if err != nil {
@@ -682,8 +681,8 @@ func (w *Watcher) sendFileCreatedEventIfNew(filePath string, fileInfo os.FileInf
 
 func (w *Watcher) internalWatch(name string, fileInfo os.FileInfo) (string, error) {
 	if fileInfo.IsDir() {
-		// mimic Linux providing delete events for subdirectories
-		// but preserve the flags used if currently watching subdirectory
+		// mimic Linux providing delete events for subdirectories, but preserve
+		// the flags used if currently watching subdirectory
 		w.mu.Lock()
 		flags := w.dirFlags[name]
 		w.mu.Unlock()

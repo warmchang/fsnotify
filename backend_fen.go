@@ -110,6 +110,12 @@ type Watcher struct {
 	Events chan Event
 
 	// Errors sends any errors.
+	//
+	// [ErrEventOverflow] is used to indicate ther are too many events:
+	//
+	//  - inotify: there are too many queued events (fs.inotify.max_queued_events sysctl)
+	//  - windows: The buffer size is too small.
+	//  - kqueue, fen: not used.
 	Errors chan error
 
 	mu      sync.Mutex
@@ -172,8 +178,8 @@ func (w *Watcher) isClosed() bool {
 
 // Close removes all watches and closes the events channel.
 func (w *Watcher) Close() error {
-	// Take the lock used by associateFile to prevent
-	// lingering events from being processed after the close
+	// Take the lock used by associateFile to prevent lingering events from
+	// being processed after the close
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.isClosed() {
@@ -187,11 +193,11 @@ func (w *Watcher) Close() error {
 //
 // A path can only be watched once; attempting to watch it more than once will
 // return an error. Paths that do not yet exist on the filesystem cannot be
-// added. A watch will be automatically removed if the path is deleted.
+// added.
 //
-// A path will remain watched if it gets renamed to somewhere else on the same
-// filesystem, but the monitor will get removed if the path gets deleted and
-// re-created, or if it's moved to a different filesystem.
+// A watch will be automatically removed if the watched path is deleted or
+// renamed. The exception is the Windows backend, which doesn't remove the
+// watcher on renames.
 //
 // Notifications on network filesystems (NFS, SMB, FUSE, etc.) or special
 // filesystems (/proc, /sys, etc.) generally don't work.
@@ -273,9 +279,9 @@ func (w *Watcher) Remove(name string) error {
 		return fmt.Errorf("%w: %s", ErrNonExistentWatch, name)
 	}
 
-	// The user has expressed an intent. Immediately remove this name
-	// from whichever watch list it might be in. If it's not in there
-	// the delete doesn't cause harm.
+	// The user has expressed an intent. Immediately remove this name from
+	// whichever watch list it might be in. If it's not in there the delete
+	// doesn't cause harm.
 	w.mu.Lock()
 	delete(w.watches, name)
 	delete(w.dirs, name)
@@ -305,8 +311,8 @@ func (w *Watcher) Remove(name string) error {
 
 // readEvents contains the main loop that runs in a goroutine watching for events.
 func (w *Watcher) readEvents() {
-	// If this function returns, the watcher has been closed and we can
-	// close these channels
+	// If this function returns, the watcher has been closed and we can close
+	// these channels
 	defer func() {
 		close(w.Errors)
 		close(w.Events)
@@ -372,11 +378,10 @@ func (w *Watcher) handleDirectory(path string, stat os.FileInfo, follow bool, ha
 	return handler(path, stat, follow)
 }
 
-// handleEvent might need to emit more than one fsnotify event
-// if the events bitmap matches more than one event type
-// (e.g. the file was both modified and had the
-// attributes changed between when the association
-// was created and the when event was returned)
+// handleEvent might need to emit more than one fsnotify event if the events
+// bitmap matches more than one event type (e.g. the file was both modified and
+// had the attributes changed between when the association was created and the
+// when event was returned)
 func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 	var (
 		events     = event.Events
@@ -405,14 +410,13 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 		reRegister = false
 	}
 	if events&unix.FILE_RENAME_TO != 0 {
-		// We don't report a Rename event for this case, because
-		// Rename events are interpreted as referring to the _old_ name
-		// of the file, and in this case the event would refer to the
-		// new name of the file. This type of rename event is not
-		// supported by fsnotify.
+		// We don't report a Rename event for this case, because Rename events
+		// are interpreted as referring to the _old_ name of the file, and in
+		// this case the event would refer to the new name of the file. This
+		// type of rename event is not supported by fsnotify.
 
-		// inotify reports a Remove event in this case, so we simulate
-		// this here.
+		// inotify reports a Remove event in this case, so we simulate this
+		// here.
 		if !w.sendEvent(path, Remove) {
 			return nil
 		}
@@ -435,31 +439,33 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 		return nil
 	}
 
-	// If we didn't get a deletion the file still exists and we're going to have to watch it again.
-	// Let's Stat it now so that we can compare permissions and have what we need
-	// to continue watching the file
+	// If we didn't get a deletion the file still exists and we're going to have
+	// to watch it again. Let's Stat it now so that we can compare permissions
+	// and have what we need to continue watching the file
 
 	stat, err := os.Lstat(path)
 	if err != nil {
-		// This is unexpected, but we should still emit an event
-		// This happens most often on "rm -r" of a subdirectory inside a watched directory
-		// We get a modify event of something happening inside, but by the time
-		// we get here, the sudirectory is already gone. Clearly we were watching this path
-		// but now it is gone. Let's tell the user that it was removed.
+		// This is unexpected, but we should still emit an event. This happens
+		// most often on "rm -r" of a subdirectory inside a watched directory We
+		// get a modify event of something happening inside, but by the time we
+		// get here, the sudirectory is already gone. Clearly we were watching
+		// this path but now it is gone. Let's tell the user that it was
+		// removed.
 		if !w.sendEvent(path, Remove) {
 			return nil
 		}
-		// Suppress extra write events on removed directories; they are not informative
-		// and can be confusing.
+		// Suppress extra write events on removed directories; they are not
+		// informative and can be confusing.
 		return nil
 	}
 
-	// resolve symlinks that were explicitly watched as we would have at Add() time.
-	// this helps suppress spurious Chmod events on watched symlinks
+	// resolve symlinks that were explicitly watched as we would have at Add()
+	// time. this helps suppress spurious Chmod events on watched symlinks
 	if isWatched {
 		stat, err = os.Stat(path)
 		if err != nil {
-			// The symlink still exists, but the target is gone. Report the Remove similar to above.
+			// The symlink still exists, but the target is gone. Report the
+			// Remove similar to above.
 			if !w.sendEvent(path, Remove) {
 				return nil
 			}
@@ -502,9 +508,9 @@ func (w *Watcher) handleEvent(event *unix.PortEvent) error {
 }
 
 func (w *Watcher) updateDirectory(path string) error {
-	// The directory was modified, so we must find unwatched entities and
-	// watch them. If something was removed from the directory, nothing will
-	// happen, as everything else should still be watched.
+	// The directory was modified, so we must find unwatched entities and watch
+	// them. If something was removed from the directory, nothing will happen,
+	// as everything else should still be watched.
 	files, err := os.ReadDir(path)
 	if err != nil {
 		return err
@@ -537,31 +543,29 @@ func (w *Watcher) associateFile(path string, stat os.FileInfo, follow bool) erro
 	if w.isClosed() {
 		return ErrClosed
 	}
-	// This is primarily protecting the call to AssociatePath
-	// but it is important and intentional that the call to
-	// PathIsWatched is also protected by this mutex.
-	// Without this mutex, AssociatePath has been seen
+	// This is primarily protecting the call to AssociatePath but it is
+	// important and intentional that the call to PathIsWatched is also
+	// protected by this mutex. Without this mutex, AssociatePath has been seen
 	// to error out that the path is already associated.
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.port.PathIsWatched(path) {
-		// Remove the old association in favor of this one
-		// If we get ENOENT, then while the x/sys/unix wrapper
-		// still thought that this path was associated,
-		// the underlying event port did not. This call will
-		// have cleared up that discrepancy. The most likely
-		// cause is that the event has fired but we haven't
-		// processed it yet.
+		// Remove the old association in favor of this one If we get ENOENT,
+		// then while the x/sys/unix wrapper still thought that this path was
+		// associated, the underlying event port did not. This call will have
+		// cleared up that discrepancy. The most likely cause is that the event
+		// has fired but we haven't processed it yet.
 		err := w.port.DissociatePath(path)
 		if err != nil && err != unix.ENOENT {
 			return err
 		}
 	}
-	// FILE_NOFOLLOW means we watch symlinks themselves rather than their targets
+	// FILE_NOFOLLOW means we watch symlinks themselves rather than their
+	// targets.
 	events := unix.FILE_MODIFIED | unix.FILE_ATTRIB | unix.FILE_NOFOLLOW
 	if follow {
-		// We *DO* follow symlinks for explicitly watched entries
+		// We *DO* follow symlinks for explicitly watched entries.
 		events = unix.FILE_MODIFIED | unix.FILE_ATTRIB
 	}
 	return w.port.AssociatePath(path, stat,
