@@ -166,6 +166,9 @@ func TestWatch(t *testing.T) {
 				// behaviour too.
 				t.Skip("broken on macOS")
 			}
+			if !internal.HasPrivilegesForSymlink() {
+				t.Skip("does not have privileges for symlink on this OS")
+			}
 
 			file := join(tmp, "file")
 			link := join(tmp, "link")
@@ -194,6 +197,9 @@ func TestWatch(t *testing.T) {
 				// Pretty sure this is caused by the broken symlink-follow
 				// behaviour too.
 				t.Skip("broken on macOS")
+			}
+			if !internal.HasPrivilegesForSymlink() {
+				t.Skip("does not have privileges for symlink on this OS")
 			}
 
 			dir := join(tmp, "dir")
@@ -246,6 +252,9 @@ func TestWatchCreate(t *testing.T) {
 
 		// Links
 		{"create new symlink to file", func(t *testing.T, w *Watcher, tmp string) {
+			if !internal.HasPrivilegesForSymlink() {
+				t.Skip("does not have privileges for symlink on this OS")
+			}
 			touch(t, tmp, "file")
 			addWatch(t, w, tmp)
 			symlink(t, join(tmp, "file"), tmp, "link")
@@ -253,6 +262,9 @@ func TestWatchCreate(t *testing.T) {
 			create  /link
 		`},
 		{"create new symlink to directory", func(t *testing.T, w *Watcher, tmp string) {
+			if !internal.HasPrivilegesForSymlink() {
+				t.Skip("does not have privileges for symlink on this OS")
+			}
 			addWatch(t, w, tmp)
 			symlink(t, tmp, tmp, "link")
 		}, `
@@ -505,6 +517,10 @@ func TestWatchRename(t *testing.T) {
 }
 
 func TestWatchSymlink(t *testing.T) {
+	if !internal.HasPrivilegesForSymlink() {
+		t.Skip("does not have privileges for symlink on this OS")
+	}
+
 	tests := []testCase{
 		{"create unresolvable symlink", func(t *testing.T, w *Watcher, tmp string) {
 			addWatch(t, w, tmp)
@@ -752,7 +768,7 @@ func TestWatchRm(t *testing.T) {
 }
 
 // TODO: this fails reguarly in the CI; not sure if it's a bug with the test or
-//       code; need to look in to it.
+// code; need to look in to it.
 func TestClose(t *testing.T) {
 	chanClosed := func(t *testing.T, w *Watcher) {
 		t.Helper()
@@ -972,7 +988,7 @@ func TestAdd(t *testing.T) {
 }
 
 // TODO: should also check internal state is correct/cleaned up; e.g. no
-//       left-over file descriptors or whatnot.
+// left-over file descriptors or whatnot.
 func TestRemove(t *testing.T) {
 	t.Run("works", func(t *testing.T) {
 		t.Parallel()
